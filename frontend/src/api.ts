@@ -53,21 +53,49 @@ function firstMessage(body: unknown): string | undefined {
   if (body && typeof body === 'object') return Object.values(body).map(firstMessage).find(Boolean)
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init)
+async function parse<T>(res: Response): Promise<T> {
   const body: unknown = await res.json().catch(() => null)
   if (!res.ok) throw new Error(firstMessage(body) ?? `Request failed (HTTP ${res.status})`)
   return body as T
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  return parse<T>(await fetch(url, init))
 }
 
 export function geocode(query: string, signal: AbortSignal): Promise<Place[]> {
   return request(`/api/geocode?q=${encodeURIComponent(query)}`, { signal })
 }
 
-export function planTrip(trip: TripRequest): Promise<TripPlan> {
-  return request('/api/trip', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(trip),
-  })
+type WeatherRequest = { url: string; params: Record<string, string>; points: [number, number][] }
+type BrowserWeather = { lat: number; lon: number; hourly: unknown }[]
+
+/** Open-Meteo limits free use per IP and cloud hosts share IPs, so when the server is rate-limited it
+ *  sends back the exact query and the browser fetches the forecasts on its own quota. */
+async function fetchWeather({ url, params, points }: WeatherRequest): Promise<BrowserWeather> {
+  const batches: [number, number][][] = []
+  for (let i = 0; i < points.length; i += 100) batches.push(points.slice(i, i + 100))
+  const results = await Promise.all(
+    batches.map(async (batch) => {
+      const query = new URLSearchParams({
+        ...params,
+        latitude: batch.map((p) => p[0]).join(','),
+        longitude: batch.map((p) => p[1]).join(','),
+      })
+      const data = await request<{ hourly: unknown } | { hourly: unknown }[]>(`${url}?${query}`)
+      return (Array.isArray(data) ? data : [data]).map((d, i) => ({ lat: batch[i][0], lon: batch[i][1], hourly: d.hourly }))
+    }),
+  )
+  return results.flat()
+}
+
+export async function planTrip(trip: TripRequest): Promise<TripPlan> {
+  const post = (body: object) =>
+    fetch('/api/trip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  let res = await post(trip)
+  if (res.status === 503) {
+    const body = (await res.clone().json().catch(() => null)) as { weather_request?: WeatherRequest } | null
+    if (body?.weather_request) res = await post({ ...trip, weather: await fetchWeather(body.weather_request) })
+  }
+  return parse<TripPlan>(res)
 }

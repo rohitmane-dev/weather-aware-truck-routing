@@ -187,7 +187,7 @@ class PlanTripTests(SimpleTestCase):
         self.services = services
         self.drop = set()  # points whose forecast "fails"
 
-        def forecast(points, start, end):
+        def forecast(points, start, end, provided=None):
             calm = {"t0": start.timestamp(), "wind": [5.0] * 100, "gust": [5.0] * 100, "rain": [0.0] * 100, "snow": [0.0] * 100}
             return {p: calm for p in points if p not in self.drop}
 
@@ -196,9 +196,9 @@ class PlanTripTests(SimpleTestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def plan(self):
+    def plan(self, weather=None):
         start = datetime.now(timezone.utc) + timedelta(hours=1)
-        return self.services.plan_trip({"lat": 40.0, "lon": -100.0}, {"lat": 40.0, "lon": -98.0}, start, 20_000, 25)
+        return self.services.plan_trip({"lat": 40.0, "lon": -100.0}, {"lat": 40.0, "lon": -98.0}, start, 20_000, 25, weather)
 
     def test_full_plan(self):
         plan = self.plan()
@@ -206,13 +206,44 @@ class PlanTripTests(SimpleTestCase):
         self.assertEqual(len(plan["heatmap"]["scores"][0]), 49)
         self.assertAlmostEqual(sum(plan["routes"][0]["summary"]["miles_by_level"]), plan["routes"][0]["distance_mi"], places=0)
 
-    def test_missing_heatmap_weather_shrinks_heatmap(self):
+    def test_missing_heatmap_weather_asks_browser_then_degrades(self):
         points = self.plan()["heatmap"]["points"]
         lon, lat = max(points, key=lambda p: p[1])  # northernmost corridor node: off-route, has its own forecast
         self.drop = {(lat, lon)}
-        self.assertEqual(len(self.plan()["heatmap"]["points"]), len(points) - 1)
-
-    def test_missing_checkpoint_weather_fails(self):
-        self.drop = {(40.0, -100.0)}  # origin checkpoint
-        with self.assertRaises(providers.ProviderError):
+        with self.assertRaises(providers.WeatherUnavailable):
             self.plan()
+        browser_attempted = [{"lat": 0.0, "lon": 0.0, "hourly": {}}]
+        self.assertEqual(len(self.plan(browser_attempted)["heatmap"]["points"]), len(points) - 1)
+
+    def test_missing_checkpoint_weather_asks_browser_to_fetch_it(self):
+        self.drop = {(40.0, -100.0)}  # origin checkpoint
+        with self.assertRaises(providers.WeatherUnavailable) as ctx:
+            self.plan()
+        request = ctx.exception.extra["weather_request"]
+        self.assertEqual(request["points"], [[40.0, -100.0]])
+        self.assertEqual(request["params"]["wind_speed_unit"], "mph")
+
+
+class BrowserWeatherTests(SimpleTestCase):
+    hourly = {"time": [1_800_000_000, 1_800_003_600], "wind_speed_10m": [10, None], "wind_gusts_10m": [15, 20],
+              "rain": [0.1, 0.0], "showers": [0.05, 0.2], "snowfall": [0, 0]}
+
+    def test_forecast_uses_browser_data_without_network(self):
+        from unittest import mock
+
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with mock.patch.object(providers, "_fetch_batch", side_effect=AssertionError("network used")):
+            series = providers.forecast([(40.0, -100.0)], start, start, {(40.0, -100.0): self.hourly})
+        self.assertEqual(series[(40.0, -100.0)]["wind"], [10, 0.0])
+        self.assertEqual(series[(40.0, -100.0)]["rain"], [0.15000000000000002, 0.2])  # rain + showers
+
+    def test_serializer_validates_weather_payload(self):
+        from .serializers import TripRequestSerializer
+
+        base = {"origin": {"lat": 40, "lon": -100}, "destination": {"lat": 40, "lon": -98},
+                "departure": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(), "load_lbs": 1000, "interval_miles": 25}
+        ok = {**base, "weather": [{"lat": 40, "lon": -100, "hourly": self.hourly}]}
+        self.assertTrue(TripRequestSerializer(data=ok).is_valid())
+        for bad in ({**self.hourly, "rain": [0.1]}, {**self.hourly, "snowfall": ["x", 0]}, {"time": [1]}):
+            data = {**base, "weather": [{"lat": 40, "lon": -100, "hourly": bad}]}
+            self.assertFalse(TripRequestSerializer(data=data).is_valid(), bad)

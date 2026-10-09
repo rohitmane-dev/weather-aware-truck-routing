@@ -16,4 +16,4 @@ RUN python -m whitenoise.compress /app/frontend/dist
 RUN useradd --create-home app
 USER app
 EXPOSE 8000
-CMD ["sh", "-c", "exec gunicorn config.wsgi --bind 0.0.0.0:${PORT:-8000} --workers 2 --threads 4 --timeout 90"]
+CMD ["sh", "-c", "exec gunicorn config.wsgi --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 8 --timeout 120"]

@@ -14,7 +14,10 @@ def _lonlat(point: tuple) -> list[float]:
     return [round(point[1], 5), round(point[0], 5)]
 
 
-def plan_trip(origin: dict, destination: dict, departure: datetime, load_lbs: int, interval_miles: int) -> dict:
+def plan_trip(
+    origin: dict, destination: dict, departure: datetime, load_lbs: int, interval_miles: int, weather: list[dict] | None = None
+) -> dict:
+    """Routes, checkpoints, risk, ranking and heatmap. `weather` is browser-fetched Open-Meteo data (see WeatherUnavailable)."""
     depart = max(departure, timezone.now()).replace(microsecond=0)  # a trip cannot start in the past
     raw_routes = providers.routes((origin["lat"], origin["lon"]), (destination["lat"], destination["lon"]), depart, load_lbs)
 
@@ -44,10 +47,12 @@ def plan_trip(origin: dict, destination: dict, departure: datetime, load_lbs: in
     hours_needed = max(HEATMAP_HOURS, math.ceil(max(r["raw"]["duration_s"] for r in routes) / 3600) + 2)
     end = start + timedelta(hours=math.ceil(hours_needed / 24) * 24)  # whole days so the cache window repeats
     heat_only = set(grid_source.values()) - checkpoint_points
-    weather = providers.forecast([*checkpoint_points, *heat_only], start, end)
-    if not checkpoint_points <= weather.keys():
-        raise providers.ProviderError("Weather service is busy or rate-limited, try again in a minute", 503)
-    grid = [p for p in grid if grid_source[p] in weather]  # heatmap degrades instead of failing the trip
+    browser_weather = {snap((w["lat"], w["lon"])): w["hourly"] for w in weather or []}
+    weather = providers.forecast([*checkpoint_points, *heat_only], start, end, browser_weather)
+    missing = [p for p in [*checkpoint_points, *heat_only] if p not in weather]
+    if (missing and not browser_weather) or not checkpoint_points <= weather.keys():
+        raise providers.WeatherUnavailable(missing, start, end)
+    grid = [p for p in grid if grid_source[p] in weather]  # after a browser attempt, the heatmap degrades instead
 
     results = []
     for r in routes:

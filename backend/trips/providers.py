@@ -27,6 +27,7 @@ class ProviderError(Exception):
     def __init__(self, message: str, status: int = 502):
         super().__init__(message)
         self.status = status
+        self.extra: dict = {}  # additional fields for the error response
 
 
 # One retry for timeouts, dropped connections and 5xx; 429 is surfaced immediately.
@@ -114,7 +115,7 @@ def _overlap(a: dict, b: dict) -> float:
 
 def routes(origin: tuple, destination: tuple, depart: datetime, load_lbs: float) -> list[dict]:
     """Up to 3 distinct truck routes, cached 10 min per departure 5-minute slot (re-plans at another interval are instant)."""
-    cache_key = f"route:{origin}:{destination}:{load_lbs}:{depart:%Y%m%d%H}:{depart.minute // 5}"
+    cache_key = f"route:{origin[0]},{origin[1]}:{destination[0]},{destination[1]}:{load_lbs}:{depart:%Y%m%d%H}:{depart.minute // 5}"
     if (hit := cache.get(cache_key)) is not None:
         return hit
     found = _routes(origin, destination, depart, load_lbs)
@@ -150,54 +151,76 @@ def _routes(origin: tuple, destination: tuple, depart: datetime, load_lbs: float
 
 # --- Open-Meteo ---------------------------------------------------------------------------------
 
-HOURLY_VARS = "wind_speed_10m,wind_gusts_10m,rain,showers,snowfall"
+HOURLY_VARS = ("wind_speed_10m", "wind_gusts_10m", "rain", "showers", "snowfall")
+OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 BATCH_SIZE = 100
 
 
-def _fetch_batch(points: list[tuple], start: datetime, end: datetime) -> list[dict]:
-    base = "https://customer-api.open-meteo.com" if settings.OPEN_METEO_API_KEY else "https://api.open-meteo.com"
-    data = _get("Weather", f"{base}/v1/forecast", {
-        "latitude": ",".join(str(lat) for lat, _ in points),
-        "longitude": ",".join(str(lon) for _, lon in points),
-        "hourly": HOURLY_VARS,
+def weather_query(start: datetime, end: datetime) -> dict:
+    """Open-Meteo parameters shared by the server fetch and the browser fallback."""
+    return {
+        "hourly": ",".join(HOURLY_VARS),
         "wind_speed_unit": "mph",
         "precipitation_unit": "inch",  # also makes snowfall inches
         "timezone": "GMT",
         "timeformat": "unixtime",
         "start_hour": start.strftime("%Y-%m-%dT%H:%M"),
         "end_hour": end.strftime("%Y-%m-%dT%H:%M"),
-        "apikey": settings.OPEN_METEO_API_KEY or None,
-    })
-    results = data if isinstance(data, list) else [data]
+    }
 
-    def values(hourly: dict, name: str) -> list[float]:
+
+def series_from_hourly(hourly: dict) -> dict:
+    def values(name: str) -> list[float]:
         return [v or 0.0 for v in hourly[name]]
 
-    return [
-        {
-            "t0": r["hourly"]["time"][0],
-            "wind": values(r["hourly"], "wind_speed_10m"),
-            "gust": values(r["hourly"], "wind_gusts_10m"),
-            # Open-Meteo splits liquid precipitation into large-scale rain and convective showers.
-            "rain": [a + b for a, b in zip(values(r["hourly"], "rain"), values(r["hourly"], "showers"))],
-            "snow": values(r["hourly"], "snowfall"),
-        }
-        for r in results
-    ]
+    return {
+        "t0": hourly["time"][0],
+        "wind": values("wind_speed_10m"),
+        "gust": values("wind_gusts_10m"),
+        # Open-Meteo splits liquid precipitation into large-scale rain and convective showers.
+        "rain": [a + b for a, b in zip(values("rain"), values("showers"))],
+        "snow": values("snowfall"),
+    }
 
 
-def forecast(points: list[tuple], start: datetime, end: datetime) -> dict[tuple, dict]:
+class WeatherUnavailable(ProviderError):
+    """Checkpoint forecasts couldn't be fetched server-side (Open-Meteo limits free use per IP, and cloud
+    hosts share IPs). Carries the exact query so the browser can fetch the data on its own quota."""
+
+    def __init__(self, points: list[tuple], start: datetime, end: datetime):
+        super().__init__("Weather service is busy or rate-limited, try again in a minute", 503)
+        self.extra = {"weather_request": {"url": OPEN_METEO_URL, "params": weather_query(start, end), "points": [list(p) for p in points]}}
+
+
+def _fetch_batch(points: list[tuple], start: datetime, end: datetime) -> list[dict]:
+    url = OPEN_METEO_URL.replace("api.", "customer-api.") if settings.OPEN_METEO_API_KEY else OPEN_METEO_URL
+    data = _get("Weather", url, {
+        "latitude": ",".join(str(lat) for lat, _ in points),
+        "longitude": ",".join(str(lon) for _, lon in points),
+        **weather_query(start, end),
+        "apikey": settings.OPEN_METEO_API_KEY or None,
+    })
+    return [series_from_hourly(r["hourly"]) for r in (data if isinstance(data, list) else [data])]
+
+
+def forecast(points: list[tuple], start: datetime, end: datetime, provided: dict | None = None) -> dict[tuple, dict]:
     """Hourly series (UTC hours from `start` to `end`) per point, cached 30 min per lattice point.
 
-    Points are fetched in the given order, so callers put essential points first. A batch that fails is
-    left out of the result; the caller decides whether the missing points matter.
+    `provided` maps points to raw Open-Meteo hourly data fetched by the browser; it is used before the
+    network. Points are fetched in the given order, so callers put essential points first. A batch that
+    fails is left out of the result; the caller decides whether the missing points matter.
     """
     window = f"{start:%Y%m%d%H}-{end:%Y%m%d%H}"
     keys = {p: f"wx:{p[0]}:{p[1]}:{window}" for p in points}
     cached = cache.get_many(keys.values())
     series = {p: cached[k] for p, k in keys.items() if k in cached}
+    from_browser = {p: series_from_hourly(provided[p]) for p in points if p not in series and p in (provided or {})}
+    series.update(from_browser)
+    cache.set_many({keys[p]: s for p, s in from_browser.items()}, 30 * 60)
+
     missing = [p for p in points if p not in series]
     batches = [missing[i:i + BATCH_SIZE] for i in range(0, len(missing), BATCH_SIZE)]
+
     def fetch(batch: list[tuple]) -> list[dict] | None:
         try:
             return _fetch_batch(batch, start, end)

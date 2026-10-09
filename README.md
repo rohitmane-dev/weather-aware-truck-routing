@@ -3,7 +3,8 @@
 React + Django app that helps a truck driver pick the safest route. It weighs forecast weather at the
 truck's ETA, the load weight, and travel time.
 
-- **Live app:** _add Render URL_
+- **Live app:** https://weather-aware-truck-routing.vercel.app (Vercel frontend, `/api` proxied to Render)
+  · direct: https://weather-truck-routing.onrender.com (free tier: the first request after ~15 min idle takes ~50 s)
 - **Walkthrough (Loom):** _add Loom URL_
 
 ## What it does
@@ -89,9 +90,13 @@ Routes are sorted by this tuple:
 - **Fewer API calls:** checkpoints snap to a global 0.1° lattice (~7 mi). Overlapping routes and repeat
   requests then share forecasts, which are cached for 30 minutes. Heatmap grid nodes reuse any checkpoint
   forecast within half a grid step, so only off-route nodes need their own call.
-- **Resilience:** forecast batches retry once on timeouts and 5xx errors. Checkpoint forecasts are fetched
-  first. If only heatmap batches fail, the trip still returns with a sparser heatmap. Missing checkpoint
-  weather fails the request with a 503 "try again" message.
+- **Rate limits and shared IPs:** Open-Meteo limits free use per IP, and cloud hosts share outbound IPs.
+  On Render's free tier the shared IP had already used up the daily quota. When the server can't fetch
+  forecasts, `/api/trip` returns 503 with a `weather_request` (URL, parameters, points). The browser
+  fetches those forecasts on its own IP quota and re-posts the trip with the raw data. The server
+  validates that data and runs it through the same parsing, risk and ranking code, and routes are cached
+  between the two requests. Forecast batches also retry once on timeouts and 5xx errors. If forecasts are
+  still missing after the browser's attempt, the heatmap thins out; missing checkpoint weather fails the request.
 
 ## Corridor heatmap
 
@@ -130,6 +135,9 @@ Routes are sorted by this tuple:
 segments: [{level, coords}], checkpoints: [{mile, lat, lon, eta, wind_mph, gust_mph, rain_in, snow_in, level, reasons}],
 summary: {miles_by_level, avg_risk, max_level} }], heatmap: { start, step_deg, points, scores } }`
 
+Optional `weather: [{lat, lon, hourly}]` carries browser-fetched Open-Meteo data after a 503 response that
+includes `weather_request` (see Weather sampling).
+
 Input rules: departure must be between now and 7 days ahead; load must be 0–80,000 lb; the interval must be
 10, 25 or 50 mi; origin and destination must be at least 1 mi apart. Provider failures return 502/503 and
 "no route" returns 422, each with a `detail` message.
@@ -162,11 +170,15 @@ docker build -t weather-truck-routing .
 docker run -p 8000:8000 -e TOMTOM_API_KEY=... -e SECRET_KEY=... weather-truck-routing
 ```
 
-## Deploying (Render)
+## Deploying
 
-`render.yaml` defines a free Docker web service. Create a new Blueprint from this repo, set
-`TOMTOM_API_KEY` when prompted, and deploy. `SECRET_KEY` is generated for you. The free tier sleeps
-after 15 minutes idle, so the first request after that takes about 50 s.
+**Render (API + app):** `render.yaml` defines a free Docker web service. Create a new Blueprint from this
+repo, set `TOMTOM_API_KEY` when prompted, and deploy. `SECRET_KEY` is generated for you. The free tier
+sleeps after 15 minutes idle, so the first request after that takes about 50 s.
+
+**Vercel (frontend):** deploy the `frontend/` directory as a Vite project. `frontend/vercel.json` rewrites
+`/api/*` to the Render service, so the browser talks to a single origin and no CORS setup is needed.
+Vercel's proxy waits up to 120 s, which covers a Render cold start.
 
 ## Assumptions and limitations
 
@@ -179,6 +191,8 @@ after 15 minutes idle, so the first request after that takes about 50 s.
 - **Forecast horizon:** departure is limited to 7 days out to stay within reliable hourly forecasts.
 - **Open-Meteo free tier:** limits are 600 calls/min, 5k/hour and 10k/day, counted per location. Chicago →
   Denver (3 routes) uses ~380 locations at 10 mi spacing, ~180 at 25 mi and ~140 at 50 mi. Several fresh
-  long trips within one minute can hit the limit, and the UI then asks you to retry. Caching keeps repeat
-  requests free, and `OPEN_METEO_API_KEY` switches to the commercial endpoint.
-- The in-memory cache is per process, which is fine for a single small instance. Use Redis for anything larger.
+  long trips within one minute can hit a user's per-minute limit. Caching keeps repeat requests free, and
+  `OPEN_METEO_API_KEY` switches the server to the commercial endpoint so the browser fallback isn't needed.
+- **One gunicorn worker (8 threads):** the in-memory caches must be shared between the two requests of
+  the browser-weather fallback. The work is I/O-bound, so threads are enough.
+- The in-memory cache is per process, which is fine for a single instance. Use Redis to scale out.

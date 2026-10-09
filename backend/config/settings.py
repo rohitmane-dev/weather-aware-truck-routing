@@ -45,6 +45,8 @@ WHITENOISE_ROOT = BASE_DIR.parent / "frontend" / "dist"
 WHITENOISE_INDEX_FILE = True
 WHITENOISE_IMMUTABLE_FILE_TEST = lambda path, url: url.startswith("/assets/")  # Vite hashed bundles
 
+DATA_UPLOAD_MAX_MEMORY_SIZE = 8 * 1024 * 1024  # browser-fetched forecasts for long trips at 10 mi spacing
+
 CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "OPTIONS": {"MAX_ENTRIES": 20000}}}
 
 REST_FRAMEWORK = {

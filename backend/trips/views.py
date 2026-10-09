@@ -28,4 +28,4 @@ class TripView(APIView):
         try:
             return Response(plan_trip(**serializer.validated_data))
         except ProviderError as e:
-            return Response({"detail": str(e)}, status=e.status)
+            return Response({"detail": str(e), **e.extra}, status=e.status)
