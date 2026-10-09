@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 
 from . import providers
-from .geo import checkpoint_miles, corridor_grid, cumulative_miles, interpolate, owned_miles, point_at, risk_segments, snap
+from .geo import checkpoint_miles, corridor_grid, cumulative_miles, interpolate, owned_miles, point_at, risk_segments, simplify, snap
 from .risk import NO_TRAVEL, classify, recommend, score, summarize
 
 HEATMAP_HOURS = 49  # forecast slider 0..48 h from departure
@@ -28,17 +28,26 @@ def plan_trip(origin: dict, destination: dict, departure: datetime, load_lbs: in
             {
                 "mile": mile,
                 "point": point_at(coords, cum, mile),
-                "eta": depart + timedelta(seconds=interpolate(raw["profile_mi"], raw["profile_s"], mile)),
+                "eta": depart + timedelta(seconds=round(interpolate(raw["profile_mi"], raw["profile_s"], mile))),
             }
             for mile in checkpoint_miles(cum[-1], interval_miles)
         ]
         routes.append({"id": route_id, "raw": raw, "coords": coords, "cum": cum, "checkpoints": checkpoints})
 
     grid, grid_step = corridor_grid([(r["coords"], r["cum"]) for r in routes])
+    checkpoint_points = {snap(cp["point"]) for r in routes for cp in r["checkpoints"]}
+    # Open-Meteo bills per location: a grid node reuses any checkpoint forecast within half a grid step.
+    nearest_node = {(round(lat / grid_step), round(lon / grid_step)): (lat, lon) for lat, lon in checkpoint_points}
+    grid_source = {p: nearest_node.get((round(p[0] / grid_step), round(p[1] / grid_step)), p) for p in grid}
+
     start = depart.replace(minute=0, second=0, microsecond=0)
     hours_needed = max(HEATMAP_HOURS, math.ceil(max(r["raw"]["duration_s"] for r in routes) / 3600) + 2)
     end = start + timedelta(hours=math.ceil(hours_needed / 24) * 24)  # whole days so the cache window repeats
-    weather = providers.forecast({snap(cp["point"]) for r in routes for cp in r["checkpoints"]} | set(grid), start, end)
+    heat_only = set(grid_source.values()) - checkpoint_points
+    weather = providers.forecast([*checkpoint_points, *heat_only], start, end)
+    if not checkpoint_points <= weather.keys():
+        raise providers.ProviderError("Weather service is busy or rate-limited, try again in a minute", 503)
+    grid = [p for p in grid if grid_source[p] in weather]  # heatmap degrades instead of failing the trip
 
     results = []
     for r in routes:
@@ -61,7 +70,7 @@ def plan_trip(origin: dict, destination: dict, departure: datetime, load_lbs: in
             "traffic_delay_s": raw["traffic_delay_s"],
             "arrival": depart + timedelta(seconds=raw["duration_s"]),
             "segments": [
-                {"level": s["level"], "coords": [_lonlat(p) for p in s["coords"]]}
+                {"level": s["level"], "coords": [_lonlat(p) for p in simplify(s["coords"])]}
                 for s in risk_segments(r["coords"], r["cum"], positions, levels)
             ],
             "checkpoints": checkpoints,
@@ -81,7 +90,7 @@ def plan_trip(origin: dict, destination: dict, departure: datetime, load_lbs: in
             "points": [_lonlat(p) for p in grid],
             "scores": [
                 [round(score(wx["wind_mph"], wx["rain_in"], wx["snow_in"], load_lbs), 1)
-                 for wx in (providers.at(weather[p], t) for t in hours)]
+                 for wx in (providers.at(weather[grid_source[p]], t) for t in hours)]
                 for p in grid
             ],
         },

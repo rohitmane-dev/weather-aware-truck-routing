@@ -90,6 +90,10 @@ class SummaryAndRecommendationTests(SimpleTestCase):
         ranked = recommend([self.route(0, [100, 0, 0, 0, 0], 0.62, 3600), self.route(1, [100, 0, 0, 0, 0], 0.3, 9000)])
         self.assertEqual(ranked[0]["id"], 1)
 
+    def test_single_route(self):
+        ranked = recommend([self.route(0, [100, 0, 0, 0, 0], 0.1, 3600)])
+        self.assertEqual((ranked[0]["rank"], ranked[0]["why"]), (1, "Only route option"))
+
     def test_similar_avg_risk_falls_through_to_travel_time(self):
         ranked = recommend([self.route(0, [100, 0, 0, 0, 0], 0.32, 5000), self.route(1, [100, 0, 0, 0, 0], 0.28, 4000)])
         self.assertEqual([r["id"] for r in ranked], [1, 0])
@@ -126,12 +130,16 @@ class GeoTests(SimpleTestCase):
         self.assertEqual(segments[-1]["coords"][-1], coords[-1])
         self.assertEqual(segments[0]["coords"][-1], segments[1]["coords"][0])
 
+    def test_simplify_drops_collinear_points_keeps_corners(self):
+        line = [(0.0, i / 100) for i in range(101)] + [(i / 100, 1.0) for i in range(1, 101)]
+        self.assertEqual(geo.simplify(line), [(0.0, 0.0), (0.0, 1.0), (1.0, 1.0)])
+
     def test_corridor_grid_bounded_and_near_route(self):
         coords = [(41.88, -87.63), (39.74, -104.99)]  # Chicago -> Denver, ~920 mi
         cum = geo.cumulative_miles(coords)
-        grid, step = geo.corridor_grid([(coords, cum)], buffer_mi=30, max_points=220)
+        grid, step = geo.corridor_grid([(coords, cum)], buffer_mi=30, max_points=180)
         self.assertGreaterEqual(step, 0.1)
-        self.assertTrue(50 < len(grid) <= 220)
+        self.assertTrue(50 < len(grid) <= 180)
         for p in grid:
             self.assertEqual(p, geo.snap(p))
             self.assertLessEqual(min(geo.haversine_mi(p, geo.point_at(coords, cum, m)) for m in range(0, int(cum[-1]), 2)), 31)
@@ -163,3 +171,48 @@ class TomTomParseTests(SimpleTestCase):
         self.assertAlmostEqual(route["length_mi"], 20)
         self.assertEqual(route["profile_s"], [0, 600, 1800])
         self.assertEqual(geo.interpolate(route["profile_mi"], route["profile_s"], 15), 1200)
+
+
+class PlanTripTests(SimpleTestCase):
+    """plan_trip with stubbed providers: a straight 2-degree route and calm weather."""
+
+    def setUp(self):
+        from unittest import mock
+
+        from . import services
+
+        coords = [(40.0, -100.0 + i / 100) for i in range(201)]
+        route = {"coords": coords, "length_mi": geo.cumulative_miles(coords)[-1], "duration_s": 7200, "traffic_delay_s": 0,
+                 "profile_mi": [0, 200], "profile_s": [0, 7200]}
+        self.services = services
+        self.drop = set()  # points whose forecast "fails"
+
+        def forecast(points, start, end):
+            calm = {"t0": start.timestamp(), "wind": [5.0] * 100, "gust": [5.0] * 100, "rain": [0.0] * 100, "snow": [0.0] * 100}
+            return {p: calm for p in points if p not in self.drop}
+
+        patches = [mock.patch.object(providers, "routes", lambda *a: [route]), mock.patch.object(providers, "forecast", forecast)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def plan(self):
+        start = datetime.now(timezone.utc) + timedelta(hours=1)
+        return self.services.plan_trip({"lat": 40.0, "lon": -100.0}, {"lat": 40.0, "lon": -98.0}, start, 20_000, 25)
+
+    def test_full_plan(self):
+        plan = self.plan()
+        self.assertEqual(plan["recommended_id"], 0)
+        self.assertEqual(len(plan["heatmap"]["scores"][0]), 49)
+        self.assertAlmostEqual(sum(plan["routes"][0]["summary"]["miles_by_level"]), plan["routes"][0]["distance_mi"], places=0)
+
+    def test_missing_heatmap_weather_shrinks_heatmap(self):
+        points = self.plan()["heatmap"]["points"]
+        lon, lat = max(points, key=lambda p: p[1])  # northernmost corridor node: off-route, has its own forecast
+        self.drop = {(lat, lon)}
+        self.assertEqual(len(self.plan()["heatmap"]["points"]), len(points) - 1)
+
+    def test_missing_checkpoint_weather_fails(self):
+        self.drop = {(40.0, -100.0)}  # origin checkpoint
+        with self.assertRaises(providers.ProviderError):
+            self.plan()

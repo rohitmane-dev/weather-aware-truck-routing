@@ -7,6 +7,8 @@ from urllib.parse import quote
 
 import requests
 from django.conf import settings
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from django.core.cache import cache
 from django.utils import timezone
 
@@ -24,9 +26,14 @@ class ProviderError(Exception):
         self.status = status
 
 
-def _get(name: str, url: str, params: dict, timeout: float = 20):
+# One retry for timeouts, dropped connections and 5xx; 429 is surfaced immediately.
+session = requests.Session()
+session.mount("https://", HTTPAdapter(max_retries=Retry(total=1, backoff_factor=1, status_forcelist=[502, 503, 504], raise_on_status=False)))
+
+
+def _get(name: str, url: str, params: dict, timeout: float = 25):
     try:
-        resp = requests.get(url, params=params, timeout=timeout)
+        resp = session.get(url, params=params, timeout=(5, timeout))
     except requests.RequestException:
         raise ProviderError(f"{name} is unreachable, try again shortly") from None  # message would leak the API key
     if resp.status_code == 429:
@@ -44,7 +51,7 @@ def _get(name: str, url: str, params: dict, timeout: float = 20):
 
 
 def geocode(query: str) -> list[dict]:
-    cache_key = f"geo:{query.lower()}"
+    cache_key = f"geo:{quote(query.lower())}"
     if (hit := cache.get(cache_key)) is not None:
         return hit
     data = _get("Geocoding", f"{TOMTOM_URL}/search/2/search/{quote(query, safe='')}.json", {
@@ -102,7 +109,17 @@ def _overlap(a: dict, b: dict) -> float:
 
 
 def routes(origin: tuple, destination: tuple, depart: datetime, load_lbs: float) -> list[dict]:
-    """Up to 3 distinct truck routes: TomTom's best plus its alternatives, topped up with via-point detours."""
+    """Up to 3 distinct truck routes, cached 10 min per departure 5-minute slot (re-plans at another interval are instant)."""
+    cache_key = f"route:{origin}:{destination}:{load_lbs}:{depart:%Y%m%d%H}:{depart.minute // 5}"
+    if (hit := cache.get(cache_key)) is not None:
+        return hit
+    found = _routes(origin, destination, depart, load_lbs)
+    cache.set(cache_key, found, 10 * 60)
+    return found
+
+
+def _routes(origin: tuple, destination: tuple, depart: datetime, load_lbs: float) -> list[dict]:
+    """TomTom's best route plus its alternatives, topped up with via-point detours."""
     found = _calculate([origin, destination], depart, load_lbs, alternatives=2)
     if len(found) >= 3:
         return found[:3]
@@ -165,16 +182,28 @@ def _fetch_batch(points: list[tuple], start: datetime, end: datetime) -> list[di
     ]
 
 
-def forecast(points: set[tuple], start: datetime, end: datetime) -> dict[tuple, dict]:
-    """Hourly series (UTC hours from `start` to `end`) per point, cached 30 min per lattice point."""
+def forecast(points: list[tuple], start: datetime, end: datetime) -> dict[tuple, dict]:
+    """Hourly series (UTC hours from `start` to `end`) per point, cached 30 min per lattice point.
+
+    Points are fetched in the given order, so callers put essential points first. A batch that fails is
+    left out of the result; the caller decides whether the missing points matter.
+    """
     window = f"{start:%Y%m%d%H}-{end:%Y%m%d%H}"
     keys = {p: f"wx:{p[0]}:{p[1]}:{window}" for p in points}
     cached = cache.get_many(keys.values())
     series = {p: cached[k] for p, k in keys.items() if k in cached}
     missing = [p for p in points if p not in series]
     batches = [missing[i:i + BATCH_SIZE] for i in range(0, len(missing), BATCH_SIZE)]
+    def fetch(batch: list[tuple]) -> list[dict] | None:
+        try:
+            return _fetch_batch(batch, start, end)
+        except ProviderError:
+            return None
+
     with ThreadPoolExecutor(max_workers=4) as pool:
-        for batch, result in zip(batches, pool.map(lambda b: _fetch_batch(b, start, end), batches)):
+        for batch, result in zip(batches, pool.map(fetch, batches)):
+            if result is None:
+                continue
             series.update(zip(batch, result))
             cache.set_many({keys[p]: s for p, s in zip(batch, result)}, 30 * 60)
     return series

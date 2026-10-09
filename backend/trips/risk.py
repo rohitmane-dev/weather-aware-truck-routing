@@ -104,13 +104,15 @@ def recommend(routes: list[dict]) -> list[dict]:
     keyed = sorted(routes, key=lambda r: rank_key(r["summary"], r["duration_s"]))
     keys = [rank_key(r["summary"], r["duration_s"]) for r in keyed]
     for rank, (route, key) in enumerate(zip(keyed, keys), start=1):
-        other = keys[1] if rank == 1 else keys[0]
-        i = _first_difference(key, other) if len(keyed) > 1 else None
-        if i is None:
-            route["why"] = "Only route option" if len(keyed) == 1 else "Ties with the recommended route"
-        elif rank == 1:
-            route["why"] = f"Best on {CRITERIA[i]}: {_fmt(i, key[i])} vs {_fmt(i, other[i])} on the next best route"
-        else:
-            route["why"] = f"Worse on {CRITERIA[i]}: {_fmt(i, key[i])} vs {_fmt(i, other[i])} on the recommended route"
         route["rank"] = rank
+        if len(keyed) == 1:
+            route["why"] = "Only route option"
+            continue
+        other, other_name = (keys[1], "the next best route") if rank == 1 else (keys[0], "the recommended route")
+        i = _first_difference(key, other)
+        if i is None:
+            route["why"] = f"Ties with {other_name}"
+        else:
+            verdict = "Best" if rank == 1 else "Worse"
+            route["why"] = f"{verdict} on {CRITERIA[i]}: {_fmt(i, key[i])} vs {_fmt(i, other[i])} on {other_name}"
     return keyed

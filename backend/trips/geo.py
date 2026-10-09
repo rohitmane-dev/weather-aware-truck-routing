@@ -78,12 +78,36 @@ def risk_segments(coords: list[tuple], cum: list[float], positions: list[float],
     return segments
 
 
+def simplify(coords: list[tuple], tolerance: float = 0.0002) -> list[tuple]:
+    """Ramer-Douglas-Peucker with a tolerance in degrees (~20 m): slims geometry sent to the map, keeps endpoints."""
+    if len(coords) < 3:
+        return coords
+    keep = [False] * len(coords)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(coords) - 1)]
+    while stack:
+        start, end = stack.pop()
+        (y1, x1), (y2, x2) = coords[start], coords[end]
+        dx, dy = x2 - x1, y2 - y1
+        norm = math.hypot(dx, dy)
+        best, index = tolerance, None
+        for i in range(start + 1, end):
+            y, x = coords[i]
+            d = abs(dy * (x - x1) - dx * (y - y1)) / norm if norm else math.hypot(x - x1, y - y1)
+            if d > best:
+                best, index = d, i
+        if index is not None:
+            keep[index] = True
+            stack += [(start, index), (index, end)]
+    return [c for c, k in zip(coords, keep) if k]
+
+
 def snap(point: tuple) -> tuple:
     """Snap to the global 0.1 degree lattice (~7 mi) so nearby requests share cached weather."""
     return (round(point[0], 1), round(point[1], 1))
 
 
-def corridor_grid(lines: list[tuple[list, list]], buffer_mi: float = 30, max_points: int = 220) -> tuple[list[tuple], float]:
+def corridor_grid(lines: list[tuple[list, list]], buffer_mi: float = 30, max_points: int = 180) -> tuple[list[tuple], float]:
     """Lattice points within `buffer_mi` of any route and the lattice step in degrees.
 
     Spacing grows until at most `max_points` remain. `lines` are (coords, cum) pairs. Grid nodes are
