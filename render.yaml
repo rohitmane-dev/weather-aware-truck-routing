@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: weather-truck-routing
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: TOMTOM_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
