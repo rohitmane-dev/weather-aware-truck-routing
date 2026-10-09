@@ -60,7 +60,7 @@ def geocode(query: str) -> list[dict]:
     if (hit := cache.get(cache_key)) is not None:
         return hit
     data = _get("Geocoding", f"{TOMTOM_URL}/search/2/search/{quote(query, safe='')}.json", {
-        "key": settings.TOMTOM_API_KEY, "typeahead": "true", "limit": 6, "countrySet": "US,CA",
+        "key": settings.TOMTOM_API_KEY, "typeahead": "true", "limit": 6,
     })
     places = [
         {

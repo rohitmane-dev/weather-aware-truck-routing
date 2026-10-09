@@ -360,7 +360,7 @@ flowchart LR
 
 ## API
 
-`GET /api/geocode?q=chicago` → `[{label, lat, lon}]`
+`GET /api/geocode?q=chicago` → `[{label, lat, lon}]` (worldwide; TomTom routing and Open-Meteo are global)
 
 `POST /api/trip`
 ```json
