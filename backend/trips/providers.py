@@ -1,5 +1,6 @@
 """Third-party clients: TomTom (truck routing, geocoding) and Open-Meteo (hourly forecasts)."""
 
+import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -13,6 +14,8 @@ from django.core.cache import cache
 from django.utils import timezone
 
 from .geo import bearing_deg, cumulative_miles, haversine_mi, offset_point, point_at
+
+logger = logging.getLogger(__name__)
 
 TOMTOM_URL = "https://api.tomtom.com"
 METERS_PER_MILE = 1609.344
@@ -37,7 +40,8 @@ def _get(name: str, url: str, params: dict, timeout: float = 25):
     except requests.RequestException:
         raise ProviderError(f"{name} is unreachable, try again shortly") from None  # message would leak the API key
     if resp.status_code == 429:
-        raise ProviderError(f"{name} rate limit reached, try again in a minute", 503)
+        reason = resp.json().get("reason", "") if "json" in resp.headers.get("content-type", "") else ""
+        raise ProviderError(f"{name} rate limit reached, try again in a minute ({reason or 'HTTP 429'})", 503)
     if resp.status_code == 400:
         body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         detail = body.get("detailedError", {}).get("message") or body.get("reason") or "invalid request"
@@ -197,7 +201,8 @@ def forecast(points: list[tuple], start: datetime, end: datetime) -> dict[tuple,
     def fetch(batch: list[tuple]) -> list[dict] | None:
         try:
             return _fetch_batch(batch, start, end)
-        except ProviderError:
+        except ProviderError as e:
+            logger.warning("Weather batch of %d points failed: %s", len(batch), e)
             return None
 
     with ThreadPoolExecutor(max_workers=4) as pool:
