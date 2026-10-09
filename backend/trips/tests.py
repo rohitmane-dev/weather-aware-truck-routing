@@ -99,6 +99,7 @@ class SummaryAndRecommendationTests(SimpleTestCase):
         self.assertEqual([r["id"] for r in ranked], [1, 0])
         self.assertEqual([r["rank"] for r in ranked], [1, 2])
         self.assertIn("travel time", ranked[0]["why"])
+        self.assertIn("1h 07m vs 1h 23m", ranked[0]["why"])  # 4000 s and 5000 s, rounded like the UI
 
 
 class GeoTests(SimpleTestCase):

@@ -91,7 +91,8 @@ def rank_key(summary: dict, duration_s: float) -> tuple:
 
 def _fmt(criterion: int, value: float) -> str:
     if criterion == 4:
-        return f"{int(value // 3600)}h {int(value % 3600 // 60):02d}m"
+        minutes = round(value / 60)  # same rounding as the UI's formatDuration
+        return f"{minutes // 60}h {minutes % 60:02d}m"
     return f"{value:g}" if criterion == 3 else f"{value:g} mi"
 
 
