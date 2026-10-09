@@ -183,6 +183,31 @@ function addLayers(map: MapLibreMap) {
   })
 }
 
+/** MapLibre throws on construction without WebGL2 (GPU acceleration off, blocked by an extension, ...). */
+function supportsWebGL2(): boolean {
+  const gl = document.createElement('canvas').getContext('webgl2')
+  gl?.getExtension('WEBGL_lose_context')?.loseContext()
+  return gl !== null
+}
+
+function NoWebGL() {
+  return (
+    <div className="grid h-full place-items-center bg-slate-200 p-6">
+      <div role="alert" className="max-w-md space-y-2 rounded-lg bg-white p-5 text-sm text-slate-700 shadow">
+        <h2 className="text-base font-semibold text-slate-900">The map needs WebGL2</h2>
+        <p>
+          This browser isn't providing WebGL2, so the map and weather heatmap can't be drawn. Route options, risk levels and
+          the recommendation still work in the side panel.
+        </p>
+        <p>
+          To fix it, turn on hardware acceleration (Chrome: Settings → System → “Use graphics acceleration when available”),
+          disable extensions that block WebGL, and restart the browser. <code>chrome://gpu</code> shows the WebGL2 status.
+        </p>
+      </div>
+    </div>
+  )
+}
+
 type Props = {
   plan: TripPlan | null
   selectedId: number | null
@@ -195,6 +220,7 @@ type Props = {
 export default function TripMap({ plan, selectedId, hoveredId, hour, truck, onSelect }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [map, setMap] = useState<MapLibreMap | null>(null)
+  const [webgl2] = useState(supportsWebGL2)
   const latest = useRef({ plan, onSelect })
 
   useEffect(() => {
@@ -202,6 +228,7 @@ export default function TripMap({ plan, selectedId, hoveredId, hour, truck, onSe
   }, [plan, onSelect])
 
   useEffect(() => {
+    if (!webgl2) return
     const m = new MapLibreMap({
       container: containerRef.current!,
       style: STYLE_URL,
@@ -232,7 +259,7 @@ export default function TripMap({ plan, selectedId, hoveredId, hour, truck, onSe
       m.on('mouseleave', layer, () => (m.getCanvas().style.cursor = ''))
     }
     return () => m.remove()
-  }, [])
+  }, [webgl2])
 
   useEffect(() => {
     if (!map) return
@@ -273,5 +300,6 @@ export default function TripMap({ plan, selectedId, hoveredId, hour, truck, onSe
     ;(map.getSource('truck') as GeoJSONSource).setData(truck ? collection([point(truck.lonLat, {})]) : collection())
   }, [map, truck])
 
+  if (!webgl2) return <NoWebGL />
   return <div ref={containerRef} className="h-full w-full" aria-label="Route map" role="region" />
 }
