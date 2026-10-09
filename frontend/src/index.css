@@ -1,0 +1,12 @@
+@import "tailwindcss";
+@import "maplibre-gl/dist/maplibre-gl.css";
+
+@theme {
+  --color-brand: #0b3d4a;
+  --color-brand-light: #135a6b;
+}
+
+html, body, #root { height: 100%; }
+body { @apply bg-slate-100 text-slate-900 antialiased; }
+
+.maplibregl-popup-content { @apply rounded-lg p-3 shadow-lg; }
