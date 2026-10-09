@@ -210,23 +210,22 @@ export default function TripMap({ plan, selectedId, hoveredId, hour, truck, onSe
       attributionControl: { compact: true },
     })
     m.addControl(new NavigationControl({ showCompass: false }), 'top-left')
+    const popup = new Popup({ maxWidth: '320px' })
     m.on('load', () => {
       addLayers(m)
       setMap(m)
-    })
-    const popup = new Popup({ maxWidth: '320px' })
-    for (const layer of ['checkpoints', 'checkpoints-alt']) {
-      m.on('click', layer, (e) => {
-        const props = e.features?.[0]?.properties
-        const route = latest.current.plan?.routes.find((r) => r.id === props?.routeId)
-        if (!props || !route) return
-        const cp = route.checkpoints[props.idx as number]
-        popup.setLngLat([cp.lon, cp.lat]).setHTML(popupHtml(route, cp)).addTo(m)
+      // One handler, topmost feature wins: selected checkpoint, then alternative checkpoint, then route line.
+      m.on('click', (e) => {
+        const [hit] = m.queryRenderedFeatures(e.point, { layers: ['checkpoints', 'checkpoints-alt', 'routes-selected', 'routes-hit'] })
+        const route = latest.current.plan?.routes.find((r) => r.id === hit?.properties.routeId)
+        if (!hit || !route) return
+        if (hit.layer.id === 'routes-hit') {
+          latest.current.onSelect(route.id)
+        } else if (hit.layer.id.startsWith('checkpoints')) {
+          const cp = route.checkpoints[hit.properties.idx as number]
+          popup.setLngLat([cp.lon, cp.lat]).setHTML(popupHtml(route, cp)).addTo(m)
+        }
       })
-    }
-    m.on('click', 'routes-hit', (e) => {
-      const routeId = e.features?.[0]?.properties?.routeId
-      if (typeof routeId === 'number') latest.current.onSelect(routeId)
     })
     for (const layer of ['checkpoints', 'checkpoints-alt', 'routes-hit']) {
       m.on('mouseenter', layer, () => (m.getCanvas().style.cursor = 'pointer'))

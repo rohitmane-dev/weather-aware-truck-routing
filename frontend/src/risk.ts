@@ -14,8 +14,9 @@ export const levelBadge = (level: Level) => LEVELS[level].badge
 export const routeName = (id: number) => `Route ${String.fromCharCode(65 + id)}`
 
 export function formatDuration(seconds: number): string {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.round((seconds % 3600) / 60)
+  const minutes = Math.round(seconds / 60)
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
   return h ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m`
 }
 

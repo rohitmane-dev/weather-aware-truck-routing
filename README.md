@@ -87,7 +87,11 @@ Routes are sorted by this tuple:
   because Open-Meteo reports precipitation as the total for the preceding hour.
 - **Wind speed:** classification uses sustained wind. Gusts are shown in popups but are not part of the rules.
 - **Fewer API calls:** checkpoints snap to a global 0.1° lattice (~7 mi). Overlapping routes and repeat
-  requests then share forecasts, which are cached for 30 minutes.
+  requests then share forecasts, which are cached for 30 minutes. Heatmap grid nodes reuse any checkpoint
+  forecast within half a grid step, so only off-route nodes need their own call.
+- **Resilience:** forecast batches retry once on timeouts and 5xx errors. Checkpoint forecasts are fetched
+  first. If only heatmap batches fail, the trip still returns with a sparser heatmap. Missing checkpoint
+  weather fails the request with a 503 "try again" message.
 
 ## Corridor heatmap
 
@@ -100,6 +104,17 @@ Routes are sorted by this tuple:
   makes no network calls.
 - The kernel radius scales with grid spacing and zoom, so heat density ≈ score and the colours line up with
   the risk levels.
+
+## Performance
+
+- **Map:** routes, checkpoints, labels and the heatmap are GeoJSON sources drawn by WebGL layers, with no DOM
+  markers. Selecting or hovering a route changes filters and paint properties only.
+- **Payload:** route geometry is simplified server-side with Ramer–Douglas–Peucker at ~20 m tolerance.
+  For Chicago → Denver this cuts ~40k to ~3.5k vertices. API responses are gzipped (~30 KB on the wire for a
+  1,000-mile trip at 25 mi), and the built JS/CSS is pre-compressed and served with immutable caching.
+- **Latency:** TomTom truck routing with alternatives takes ~4–6 s for a 1,000-mile trip, and fresh weather
+  takes 1–3 s. Routes are cached for 10 minutes per origin, destination, load and departure slot, so
+  re-planning at another checkpoint interval returns in under a second.
 
 ## API
 
@@ -158,11 +173,12 @@ after 15 minutes idle, so the first request after that takes about 50 s.
 - **ETAs are continuous drive time** from TomTom's truck profile. Hours-of-Service breaks (30 min after
   8 h, 10 h rest after 11 h) are not added, so multi-day ETAs are optimistic.
 - **Load weight is cargo weight.** TomTom routing gets gross weight = load + 35,000 lb typical tare.
-- **Three routes:** TomTom sometimes returns fewer than 2 alternatives. The backend then requests detours
-  through points offset sideways from the main route's midpoint and drops near-duplicates. These forced
-  detours can include a small loop.
+- **Three routes:** TomTom normally returns 2 alternatives (verified on long, medium and short trips). When
+  it returns fewer, the backend requests detours through points offset sideways from the main route's
+  midpoint and drops near-duplicates. These forced detours can include a small loop.
 - **Forecast horizon:** departure is limited to 7 days out to stay within reliable hourly forecasts.
-- **Open-Meteo free tier:** limits are 600 calls/min and 10k calls/day, counted per location. A long trip
-  at 10 mi spacing uses a few hundred. Caching keeps repeat requests cheap; `OPEN_METEO_API_KEY` switches
-  to the commercial endpoint.
+- **Open-Meteo free tier:** limits are 600 calls/min, 5k/hour and 10k/day, counted per location. Chicago →
+  Denver (3 routes) uses ~380 locations at 10 mi spacing, ~180 at 25 mi and ~140 at 50 mi. Several fresh
+  long trips within one minute can hit the limit, and the UI then asks you to retry. Caching keeps repeat
+  requests free, and `OPEN_METEO_API_KEY` switches to the commercial endpoint.
 - The in-memory cache is per process, which is fine for a single small instance. Use Redis for anything larger.
