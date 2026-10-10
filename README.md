@@ -5,7 +5,7 @@ truck's ETA, the load weight, and travel time.
 
 - **Live app:** https://weather-aware-truck-routing.vercel.app (Vercel frontend, `/api` proxied to Render)
   · direct: https://weather-truck-routing.onrender.com (free tier: the first request after ~15 min idle takes ~50 s)
-- **Walkthrough (Loom):** _add Loom URL_
+- **Walkthrough (Loom):** https://www.loom.com/share/620c16671c004dcaaf25ab50abf721c6
 
 ## What it does
 
